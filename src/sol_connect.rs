@@ -1,124 +1,222 @@
-use anchor_client::solana_sdk::{pubkey::Pubkey, signer::Signer, signature::Keypair};
-use anchor_client::Client;
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::transaction::Transaction;
-use solana_sdk::system_instruction;
-use anchor_client::program::{Program, ProgramError};
-use solana_sdk::commitment_config::CommitmentConfig;
-use bls12_381::{Bls12, Scalar};
+use anchor_client;
+#[allow(unused_imports)]
+pub use solana_client::rpc_client::RpcClient;
+pub use borsh::{BorshDeserialize, BorshSerialize};
 
-use anchor_lang::prelude::*;
-use bellman::groth16::Proof;
-use bincode; // For compact serialization
-use ark_ff::PrimeField;
+#[allow(unused_imports)]
+pub use solana_sdk::{
+    commitment_config::CommitmentConfig,
+    instruction::{AccountMeta, Instruction},
+    message::Message,
+    pubkey::Pubkey,
+    signature::Signature,
+    signature::{Keypair, Signer},
+    signer::EncodableKey,
+    system_program,
+    transaction::Transaction,
+};
+use std::str::FromStr;
+use crate::handlers::zkphandler::ScalarWrapper;
 
-const PROGRAM_ID: &str = "EgM2WEYJ6cDjkEmRvN6S5t2CgeJYaRLWK82qwwDBaSBy"; // Replace with your program ID
-const RPC_URL: &str = "https://api.devnet.solana.com"; // Solana RPC URL
+#[derive(BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "borsh")]
+pub struct UserData {
+    public_input : Vec<ScalarWrapper>
+}
 
+#[derive(BorshSerialize, BorshDeserialize)]
+#[borsh(crate = "borsh")]
+pub struct SigninData {
+    proof_bytes: Vec<u8>,
+    vk_to_send : Vec<u8>
+}
+pub fn user_sign_up(public_input: Vec<ScalarWrapper>) {
+     // create a Rpc client connection
+     let url = "https://api.devnet.solana.com".to_string();
+     let timeout = std::time::Duration::from_secs(50);
+     let connection = RpcClient::new_with_timeout(url, timeout);
+     let program_id = Pubkey::from_str("EiPQE6iT1GWf8AWrw1XrjmnxGLa63Scuku7eef3v3Smb").unwrap();
+    //  let account_new = Keypair::new().pubkey();
+     let payer = Keypair::read_from_file("src/wallet-keypair.json").unwrap();
 
-pub fn user_sign_up(public_input: Vec<Scalar>) -> Result<(), ProgramError> {
-    // Establish connection to Solana
-    let rpc_client = RpcClient::new_with_commitment(RPC_URL.to_string(), CommitmentConfig::confirmed());
+    let seed_text = b"user_data";
+    // Convert string to &[u8]
+    let seed_text_slice: &[u8] = seed_text;
+    let (account_new, _) = Pubkey::find_program_address(&[&seed_text_slice], &program_id);
 
-    // Generate keypair for the wallet (or use an existing one)
-    let user_keypair = Keypair::new();
+    let instruction_name = "user_sign_up";
+    
+    println!("instruction_name:{}", instruction_name);
+     //  construct instruction data
+     let instruction_data = UserData {
+        public_input
+     };
 
-    // Create an anchor client to interact with the Solana program
-    let client = Client::new_with_options(
-        rpc_client,
-        user_keypair.clone(),
-        CommitmentConfig::confirmed(),
+     // setup signers
+     let signers = &[&payer];
+     // set up accounts
+     let accounts = vec![
+         AccountMeta::new(account_new, false),
+         AccountMeta::new_readonly(payer.pubkey(), true),
+         AccountMeta::new_readonly(system_program::ID, false),
+         ];
+         
+         println!("Accounts : {:?}", accounts);
+     // call signed call
+     let _tx_signature = sign_up_call(
+         &connection,
+         &program_id,
+         &payer,
+         signers,
+         instruction_name,
+         instruction_data,
+         accounts,
+     )
+     .unwrap();
+ }
+
+ pub fn user_sign_in(proof_bytes: Vec<u8>, vk_to_send : Vec<u8>) {
+    // create a Rpc client connection
+    let url = "https://api.devnet.solana.com".to_string();
+    let timeout = std::time::Duration::from_secs(50);
+    let connection = RpcClient::new_with_timeout(url, timeout);
+    let program_id = Pubkey::from_str("EiPQE6iT1GWf8AWrw1XrjmnxGLa63Scuku7eef3v3Smb").unwrap();
+   //  let account_new = Keypair::new().pubkey();
+    let payer = Keypair::read_from_file("src/wallet-keypair.json").unwrap();
+
+   let instruction_name = "user_sign_in";
+   
+   println!("instruction_name:{}", instruction_name);
+    //  construct instruction data
+    let instruction_data = SigninData{
+        proof_bytes,
+        vk_to_send
+    };
+
+    // setup signers
+    let signers = &[&payer];
+    // set up accounts
+    let seed_text = b"user_data";
+    // Convert string to &[u8]
+    let seed_text_slice: &[u8] = seed_text;
+    let (account_new, _) = Pubkey::find_program_address(&[&seed_text_slice], &program_id);
+    let accounts = vec![
+         AccountMeta::new(account_new, false),
+         AccountMeta::new_readonly(payer.pubkey(), true),
+         AccountMeta::new_readonly(system_program::ID, false),
+         ];
+     // call signed call
+     let _tx_signature = sign_in_call(
+        &connection,
+        &program_id,
+        &payer,
+        signers,
+        instruction_name,
+        instruction_data,
+        accounts,
+    )
+    .unwrap();
+}
+
+pub fn sign_up_call(
+    connection: &RpcClient,
+    program_id: &Pubkey,
+    payer: &Keypair,
+    signers: &[&Keypair],
+    instruction_name: &str,
+    instruction_data: UserData,
+    accounts: Vec<AccountMeta>,
+) -> Result<Signature, Box<dyn std::error::Error>>
+
+{
+    // get discriminant
+    let instruction_discriminant = get_discriminant("global", instruction_name);
+
+    // construct instruction
+    let ix = Instruction::new_with_borsh(
+        program_id.clone(),
+        &(instruction_discriminant, instruction_data),
+        accounts.clone(),
     );
 
-    // Load the program and interact with it
-    let program = client.program(Pubkey::from_str(PROGRAM_ID)?);
-    // Define the account address to store user data
-    let user_data_account = Pubkey::find_program_address(
-        &[b"user_data", &user_keypair.pubkey().to_bytes()],
-        &program.id(),
-    ).0;
-    let public_input_bytes = serialize_scalars(&public_input);
-    // Call the user_sign_up function on the program
-    program.rpc()
-        .user_sign_up(public_input_bytes)
-        .accounts(
-            accounts::UserSignUp {
-                user_data: user_data_account,
-                user: user_keypair.pubkey(),
-                system_program: system_instruction::program_id(),
-            }
-        )
-        .signer(user_keypair)
-        .send()?;
+    // get latest block hash
+    let blockhash = connection.get_latest_blockhash().unwrap();
 
-    println!("User signed up successfully");
-    Ok(())
+    // construct message
+    let msg = Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &blockhash);
+
+    //construct transaction
+    let mut tx = Transaction::new_unsigned(msg);
+
+    // sign transaction
+    tx.sign(signers, tx.message.recent_blockhash);
+
+    // send and confirm transaction
+    let tx_signature = connection
+    .send_and_confirm_transaction_with_spinner(&tx)
+    .map_err(|err| {
+        println!("Transaction Error : {:?}", err);
+        }).unwrap();
+    println!("Signed Up Successfuly!. Transaction ID: {}", tx_signature);
+
+    Ok(tx_signature)
 }
+pub fn sign_in_call(
+    connection: &RpcClient,
+    program_id: &Pubkey,
+    payer: &Keypair,
+    signers: &[&Keypair],
+    instruction_name: &str,
+    instruction_data: SigninData,
+    accounts: Vec<AccountMeta>,
+) -> Result<Signature, Box<dyn std::error::Error>>
 
-pub fn user_sign_in(proof: Proof<Bls12>) -> Result<(), ProgramError> {
-    // Serialize the proof
-    let proof_bytes = serialize_proof(&proof);
-    // Establish connection to Solana
-    let rpc_client = RpcClient::new_with_commitment(RPC_URL.to_string(), CommitmentConfig::confirmed());
+{
+    // get discriminant
+    let instruction_discriminant = get_discriminant("global", instruction_name);
 
-    // Generate keypair for the wallet (or use an existing one)
-    let user_keypair = Keypair::new();
-
-    // Create an anchor client to interact with the Solana program
-    let client = Client::new_with_options(
-        rpc_client,
-        user_keypair.clone(),
-        CommitmentConfig::confirmed(),
+    // construct instruction
+    let ix = Instruction::new_with_borsh(
+        program_id.clone(),
+        &(instruction_discriminant, instruction_data),
+        accounts.clone(),
     );
 
-    // Load the program and interact with it
-    let program = client.program(Pubkey::from_str(PROGRAM_ID)?);
-    // Fetch user data (you need to verify that this exists and contains the correct public input)
-    let user_data_account = Pubkey::find_program_address(
-        &[b"user_data", &user_keypair.pubkey().to_bytes()],
-        &program.id(),
-    ).0;
+    // get latest block hash
+    let blockhash = connection.get_latest_blockhash().unwrap();
 
-    // Call the user_sign_in function with proof
-    program.rpc()
-        .user_sign_in(proof_bytes)
-        .accounts(
-            accounts::UserSignUp {
-                user_data: user_data_account,
-                user: user_keypair.pubkey(),
-                system_program: system_instruction::program_id(),
-            }
-        )
-        .signer(user_keypair)
-        .send()?;
+    // construct message
+    let msg = Message::new_with_blockhash(&[ix], Some(&payer.pubkey()), &blockhash);
 
-    println!("User sign-in completed");
-    Ok(())
+    //construct transaction
+    let mut tx = Transaction::new_unsigned(msg);
+
+    // sign transaction
+    tx.sign(signers, tx.message.recent_blockhash);
+
+    // send and confirm transaction
+    let tx_signature = connection
+    .send_and_confirm_transaction_with_spinner(&tx)
+    .map_err(|err| {
+        println!("Transaction Error : {:?}", err);
+        }).unwrap();
+    println!("Signed In Successfuly!. Transaction ID: {}", tx_signature);
+
+    Ok(tx_signature)
 }
 
-mod accounts {
-    use anchor_lang::prelude::*;
-    use bls12_381::Scalar;
+/// returns function signature
+///
+/// accepts name space and name function
+pub fn get_discriminant(namespace: &str, name: &str) -> [u8; 8] {
+    let preimage = format!("{}:{}", namespace, name);
 
-    #[derive(Accounts)]
-    pub struct UserSignUp<'info> {
-        #[account(init, payer = user, space = 8 + UserData::INIT_SPACE)] // Adjust space according to UserData struct
-        pub user_data: Account<'info, UserData>,
-        #[account(mut)]
-        pub user: Signer<'info>,
-        pub system_program: Program<'info, System>,
-    }
-    #[account]
-    pub struct UserData {
-        #[max_len(200)]
-        pub public_input: Vec<Scalar>,
-    }
-}
-
-
-fn serialize_proof(proof: &Proof<Bls12>) -> Vec<u8> {
-    bincode::serialize(proof).expect("Serialization failed")
-}
-fn serialize_scalars<T: PrimeField>(scalars: &Vec<T>) -> Vec<u8> {
-    bincode::serialize(scalars).expect("Serialization failed")
+    let mut sighash = [0u8; 8];
+    sighash.copy_from_slice(
+        &anchor_client::anchor_lang::solana_program::hash::hash(preimage.as_bytes()).to_bytes()
+            [..8],
+    );
+    
+    // println!("signature-hash:{:?}", sighash);
+    sighash
 }
